@@ -19,24 +19,43 @@ parser.add_argument('-data_root', default='' , type=str)
 parser.add_argument('-use_class_list', default=False,type=lambda x: (str(x).lower() == 'true'))
 parser.add_argument('-class_list', default=[], nargs='*')
 parser.add_argument('-debug', default=False,type=lambda x: (str(x).lower() == 'true'))
+parser.add_argument("-ignoreImageCount", help="ignores the number of images", action="store_true")
 
-parser.add_argument('-multiprocessing_workers', default = 8, type=int)
+parser.add_argument('-multiprocessing_workers', default = 20, type=int)
 
 args, args_other = parser.parse_known_args()
 
+logFormatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s")
+rootLogger = logging.getLogger()
+
+fileHandler = logging.FileHandler("{0}/{1}.log".format('./', 'imagenet_scarper.log'))
+fileHandler.setFormatter(logFormatter)
+rootLogger.addHandler(fileHandler)
+
+consoleHandler = logging.StreamHandler()
+consoleHandler.setFormatter(logFormatter)
+rootLogger.addHandler(consoleHandler)
+
 if args.debug:
-    logging.basicConfig(filename='imagenet_scarper.log', level=logging.DEBUG)
+    rootLogger.setLevel(logging.DEBUG)
+    # logging.basicConfig(level=logging.DEBUG)
+    # logging.basicConfig(filename='imagenet_scarper.log', level=logging.DEBUG)
+else:
+    rootLogger.setLevel(logging.INFO)
+    # logging.basicConfig(level=logging.INFO)
+    # logging.basicConfig(filename='imagenet_scarper.log', level=logging.INFO)
 
 if len(args.data_root) == 0:
     logging.error("-data_root is required to run downloader!")
     exit()
 
+logging.info('dest: ' + args.data_root)
 if not os.path.isdir(args.data_root):
-    logging.error(f'folder {args.data_root} does not exist! please provide existing folder in -data_root arg!')
+    logging.error('folder {dr} does not exist! please provide existing folder in -data_root arg!'.format(dr=args.data_root))
     exit()
 
 
-IMAGENET_API_WNID_TO_URLS = lambda wnid: f'http://www.image-net.org/api/text/imagenet.synset.geturls?wnid={wnid}'
+IMAGENET_API_WNID_TO_URLS = lambda wnid: 'http://www.image-net.org/api/text/imagenet.synset.geturls?wnid=%s' % (wnid,)
 
 current_folder = os.path.dirname(os.path.realpath(__file__))
 
@@ -48,13 +67,14 @@ class_info_dict = dict()
 with open(class_info_json_filepath) as class_info_json_f:
     class_info_dict = json.load(class_info_json_f)
 
+logging.info('number of available classes: ' + str(len(class_info_dict)))
 classes_to_scrape = []
 
 if args.use_class_list == True:
    for item in args.class_list:
        classes_to_scrape.append(item)
        if item not in class_info_dict:
-           logging.error(f'Class {item} not found in ImageNete')
+           logging.error('Class %s not found in ImageNet' % (item,) )
            exit()
 
 elif args.use_class_list == False:
@@ -64,14 +84,20 @@ elif args.use_class_list == False:
         if args.scrape_only_flickr:
             if int(val['flickr_img_url_count']) * 0.9 > args.images_per_class:
                 potential_class_pool.append(key)
+            elif args.ignoreImageCount:
+                potential_class_pool.append(key)
         else:
             if int(val['img_url_count']) * 0.8 > args.images_per_class:
                 potential_class_pool.append(key)
+            elif args.ignoreImageCount:
+                potential_class_pool.append(key)
 
     if (len(potential_class_pool) < args.number_of_classes):
-        logging.error(f"With {args.images_per_class} images per class there are {len(potential_class_pool)} to choose from.")
-        logging.error(f"Decrease number of classes or decrease images per class.")
-        exit()
+        logging.warning("With %s images per class there are %d to choose from." % (args.images_per_class, len(potential_class_pool), ) )
+        logging.warning("Decrease number of classes or decrease images per class.")
+
+        if not args.ignoreImageCount:
+            exit(-1)
 
     picked_classes_idxes = np.random.choice(len(potential_class_pool), args.number_of_classes, replace = False)
 
@@ -79,7 +105,7 @@ elif args.use_class_list == False:
         classes_to_scrape.append(potential_class_pool[idx])
 
 
-print("Picked the following clases:")
+print("Picked the following classes:")
 print([ class_info_dict[class_wnid]['class_name'] for class_wnid in classes_to_scrape ])
 
 imagenet_images_folder = os.path.join(args.data_root, 'imagenet_images')
@@ -184,14 +210,14 @@ def print_stats(cls, print_func):
 
     #print(f"actual all time: {actual_all_time_spent} proc all time {processes_all_time_spent}")
 
-    print_func(f'STATS For class {cls}:')
-    print_func(f' tried {multi_stats.get(cls, "tried")} urls with'
-               f' {multi_stats.get(cls, "success")} successes')
+    print_func('STATS For class {cls}:'.format(cls=cls))
+    print_func(' tried {tried} urls with'.format(tried=multi_stats.get(cls, "tried"))
+               +' {success} successes'.format(success=multi_stats.get(cls, "success")) )
 
     if multi_stats.get(cls, "tried") > 0:
-        print_func(f'{100.0 * multi_stats.get(cls, "success")/multi_stats.get(cls, "tried")}% success rate for {cls} urls ')
+        print_func('{rate}% success rate for {cls} urls '.format(rate=100.0 * multi_stats.get(cls, "success")/multi_stats.get(cls, "tried"), cls=cls))
     if multi_stats.get(cls, "success") > 0:
-        print_func(f'{multi_stats.get(cls,"time_spent") * actual_processes_ratio / multi_stats.get(cls,"success")} seconds spent per {cls} succesful image download')
+        print_func('{secs} seconds spent per {cls} succesful image download'.format(secs=multi_stats.get(cls,"time_spent") * actual_processes_ratio / multi_stats.get(cls,"success"), cls=cls))
 
 
 
@@ -229,6 +255,10 @@ def get_image(img_url):
         if args.scrape_only_flickr:
             return
 
+    img_name = img_url.split('/')[-1]
+    img_name = img_name.split("?")[0]
+
+
     t_start = time.time()
 
     def finish(status):
@@ -246,7 +276,7 @@ def get_image(img_url):
         elif status == 'failure':
             pass
         else:
-            logging.error(f'No such status {status}!!')
+            logging.error('No such status {status}!!'.format(status=status))
             exit()
         return
 
@@ -254,23 +284,33 @@ def get_image(img_url):
     with lock:
         url_tries.value += 1
         if url_tries.value % 250 == 0:
-            print(f'\nScraping stats:')
+            print('\nScraping stats:')
             print_stats('is_flickr', print)
             print_stats('not_flickr', print)
             print_stats('all', print)
             if args.debug:
                 add_stats_to_debug_csv()
 
+    if (len(img_name) <= 1):
+        return finish('failure')
+
+    img_file_path = os.path.join(class_folder, img_name)
+    if os.path.exists(img_file_path):
+        with lock:
+            class_images.value += 1
+        logging.debug('file already downloaded: ' + img_file_path)
+        return finish('success')
+
     try:
         img_resp = requests.get(img_url, timeout = 1)
     except ConnectionError:
-        logging.debug(f"Connection Error for url {img_url}")
+        logging.debug("Connection Error for url " + img_url)
         return finish('failure')
     except ReadTimeout:
-        logging.debug(f"Read Timeout for url {img_url}")
+        logging.debug("Read Timeout for url " + img_url)
         return finish('failure')
     except TooManyRedirects:
-        logging.debug(f"Too many redirects {img_url}")
+        logging.debug("Too many redirects " + img_url)
         return finish('failure')
     except MissingSchema:
         return finish('failure')
@@ -288,16 +328,9 @@ def get_image(img_url):
         return finish('failure')
 
     logging.debug(img_resp.headers['content-type'])
-    logging.debug(f'image size {len(img_resp.content)}')
+    logging.debug('image size ' + str(len(img_resp.content)))
 
-    img_name = img_url.split('/')[-1]
-    img_name = img_name.split("?")[0]
-
-    if (len(img_name) <= 1):
-        return finish('failure')
-
-    img_file_path = os.path.join(class_folder, img_name)
-    logging.debug(f'Saving image in {img_file_path}')
+    logging.debug('Saving image in ' + img_file_path)
 
     with open(img_file_path, 'wb') as img_f:
         img_f.write(img_resp.content)
@@ -305,18 +338,19 @@ def get_image(img_url):
         with lock:
             class_images.value += 1
 
-        logging.debug(f'Scraping stats')
+        logging.debug('Scraping stats')
         print_stats('is_flickr', logging.debug)
         print_stats('not_flickr', logging.debug)
         print_stats('all', logging.debug)
 
         return finish('success')
 
-
+cnt = 0
 for class_wnid in classes_to_scrape:
 
+    cnt += 1
     class_name = class_info_dict[class_wnid]["class_name"]
-    print(f'Scraping images for class \"{class_name}\"')
+    logging.info('********************** (% 3d/% 4d)   Scraping images for class: %s' % (cnt, len(classes_to_scrape), class_name,) )
     url_urls = IMAGENET_API_WNID_TO_URLS(class_wnid)
 
     time.sleep(0.05)
@@ -333,6 +367,6 @@ for class_wnid in classes_to_scrape:
     #for url in  urls:
     #    get_image(url)
 
-    print(f"Multiprocessing workers: {args.multiprocessing_workers}")
+    logging.info("  Multiprocessing workers: {w}".format(w=args.multiprocessing_workers))
     with Pool(processes=args.multiprocessing_workers) as p:
         p.map(get_image,urls)
