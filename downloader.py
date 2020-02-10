@@ -1,3 +1,12 @@
+
+'''
+
+example:
+python ImageNet-Datasets-Downloader/downloader.py -data_root=/media/georg/Datasets/ImageNet/images/ -number_of_classes 20000 -images_per_class 20000 -scrape_only_flickr false -ignoreImageCount
+
+
+'''
+
 import os
 import numpy as np
 import requests
@@ -6,6 +15,7 @@ import json
 import time
 import logging
 import csv
+import hashlib
 
 from multiprocessing import Pool, Process, Value, Lock
 
@@ -20,8 +30,9 @@ parser.add_argument('-use_class_list', default=False,type=lambda x: (str(x).lowe
 parser.add_argument('-class_list', default=[], nargs='*')
 parser.add_argument('-debug', default=False,type=lambda x: (str(x).lower() == 'true'))
 parser.add_argument("-ignoreImageCount", help="ignores the number of images", action="store_true")
+parser.add_argument("-dryrun", help="don't download only simulate", action="store_true")
 
-parser.add_argument('-multiprocessing_workers', default = 20, type=int)
+parser.add_argument('-multiprocessing_workers', default=50, type=int)
 
 args, args_other = parser.parse_known_args()
 
@@ -35,6 +46,7 @@ rootLogger.addHandler(fileHandler)
 consoleHandler = logging.StreamHandler()
 consoleHandler.setFormatter(logFormatter)
 rootLogger.addHandler(consoleHandler)
+
 
 if args.debug:
     rootLogger.setLevel(logging.DEBUG)
@@ -184,6 +196,7 @@ if args.debug:
     ]
     add_debug_csv_row(row)
 
+
 def add_stats_to_debug_csv():
     row = [
         multi_stats.get('all', 'tried'),
@@ -197,6 +210,7 @@ def add_stats_to_debug_csv():
         multi_stats.get('not_flickr', 'time_spent'),
     ]
     add_debug_csv_row(row)
+
 
 def print_stats(cls, print_func):
 
@@ -220,6 +234,14 @@ def print_stats(cls, print_func):
         print_func('{secs} seconds spent per {cls} succesful image download'.format(secs=multi_stats.get(cls,"time_spent") * actual_processes_ratio / multi_stats.get(cls,"success"), cls=cls))
 
 
+def is_ascii(s):
+    try:
+        s.encode().decode('ascii')
+    except UnicodeDecodeError:
+        return False
+    return True
+    # return all(ord(c) < 128 for c in s)
+
 
 lock = Lock()
 url_tries = Value('d', 0)
@@ -227,16 +249,11 @@ scraping_t_start = Value('d', time.time())
 class_folder = ''
 class_images = Value('d', 0)
 
+
 def get_image(img_url):
-
     #print(f'Processing {img_url}')
-
-    #time.sleep(3)
-
     if len(img_url) <= 1:
         return
-
-
     cls_imgs = 0
     with lock:
         cls_imgs = class_images.value
@@ -257,6 +274,14 @@ def get_image(img_url):
 
     img_name = img_url.split('/')[-1]
     img_name = img_name.split("?")[0]
+
+    if img_name.find('..') != -1 or img_name.find('/') != -1 or img_name.find('\\') != -1 or len(img_name)>200 or not is_ascii(img_name):
+        sha_1 = hashlib.sha1()
+        sha_1.update(img_name.encode())
+        s = sha_1.hexdigest()
+        s += '.' + img_name.split('.')[-1]
+        logging.info('renaming file: %s --> %s' % (img_name, s,))
+        img_name = s
 
 
     t_start = time.time()
@@ -294,11 +319,26 @@ def get_image(img_url):
     if (len(img_name) <= 1):
         return finish('failure')
 
-    img_file_path = os.path.join(class_folder, img_name)
+    localImgageName = img_name.lower()
+
+    link_file_path = os.path.join(class_folder, localImgageName)
+    if os.path.exists(link_file_path):
+        with lock:
+            class_images.value += 1
+        logging.debug('file already downloaded: ' + localImgageName)
+        return finish('success')
+
+    relLink = '../../realfiles/' + localImgageName[0]
+    mainImgFolder = os.path.join(class_folder, relLink)
+    os.makedirs(mainImgFolder, exist_ok=True)
+    img_file_path = os.path.join(mainImgFolder, localImgageName)
+    rel_file_path = os.path.join(relLink, localImgageName)
     if os.path.exists(img_file_path):
         with lock:
             class_images.value += 1
-        logging.debug('file already downloaded: ' + img_file_path)
+        logging.debug('file already downloaded but not linked: ' + localImgageName)
+        if not os.path.exists(link_file_path):
+            os.symlink(rel_file_path, link_file_path)
         return finish('success')
 
     try:
@@ -315,6 +355,21 @@ def get_image(img_url):
     except MissingSchema:
         return finish('failure')
     except InvalidURL:
+        return finish('failure')
+    except UnicodeDecodeError as err:
+        logging.warning('Unicode error for "%s": %s' % (img_url, str(err),) )
+        return finish('failure')
+    except UnicodeError as err:
+        logging.warning('Unicode error for "%s": %s' % (img_url, str(err),) )
+        return finish('failure')
+    except requests.exceptions.ContentDecodingError as err:
+        logging.warning('Content-problem error for "%s": %s' % (img_url, str(err),) )
+        return finish('failure')
+    except requests.exceptions.InvalidSchema as err:
+        logging.warning('Invalid schema for "%s": %s' % (img_url, str(err),) )
+        return finish('failure')
+    except requests.exceptions.ChunkedEncodingError as err:
+        logging.warning('Invalid chunks for "%s": %s' % (img_url, str(err),) )
         return finish('failure')
 
     if not 'content-type' in img_resp.headers:
@@ -343,6 +398,9 @@ def get_image(img_url):
         print_stats('not_flickr', logging.debug)
         print_stats('all', logging.debug)
 
+        if not os.path.exists(link_file_path):
+            os.symlink(rel_file_path, link_file_path)
+
         return finish('success')
 
 cnt = 0
@@ -356,17 +414,15 @@ for class_wnid in classes_to_scrape:
     time.sleep(0.05)
     resp = requests.get(url_urls)
 
-    class_folder = os.path.join(imagenet_images_folder, class_name)
+    class_folder = os.path.join(imagenet_images_folder, class_wnid + '___' + class_name)
     if not os.path.exists(class_folder):
         os.mkdir(class_folder)
 
     class_images.value = 0
 
     urls = [url.decode('utf-8') for url in resp.content.splitlines()]
-
-    #for url in  urls:
-    #    get_image(url)
+    logging.info('number of images for class: ' + str(len(urls)))
 
     logging.info("  Multiprocessing workers: {w}".format(w=args.multiprocessing_workers))
     with Pool(processes=args.multiprocessing_workers) as p:
-        p.map(get_image,urls)
+        p.map(get_image, urls)
