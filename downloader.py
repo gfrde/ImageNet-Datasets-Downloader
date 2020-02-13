@@ -76,6 +76,10 @@ class_info_json_filepath = os.path.join(current_folder, class_info_json_filename
 
 class_info_dict = dict()
 
+imglists = os.path.join(args.data_root, 'imglists')
+if not os.path.exists(imglists):
+    os.mkdir(imglists)
+
 with open(class_info_json_filepath) as class_info_json_f:
     class_info_dict = json.load(class_info_json_f)
 
@@ -274,15 +278,23 @@ def get_image(img_url):
 
     img_name = img_url.split('/')[-1]
     img_name = img_name.split("?")[0]
+    img_name = img_name.split("&")[0]
 
-    if img_name.find('..') != -1 or img_name.find('/') != -1 or img_name.find('\\') != -1 or len(img_name)>200 or not is_ascii(img_name):
-        sha_1 = hashlib.sha1()
-        sha_1.update(img_name.encode())
-        s = sha_1.hexdigest()
+    sha_1 = hashlib.sha1()
+    sha_1.update(img_url.encode())
+    # sha_1.update(img_name.encode())
+    s = sha_1.hexdigest()
+    img_name = img_name.replace('%20', ' ').replace('%', '').replace('(', '_').replace(')', '_').\
+        replace('!', '').replace('%', '').replace('..', '_').replace(',', '_').\
+        replace('\'', '_')
+    if img_name.find('..') != -1 or img_name.find('/') != -1 or img_name.find('\\') != -1 or\
+            len(img_name)>200 or not is_ascii(img_name):
         s += '.' + img_name.split('.')[-1]
-        logging.info('renaming file: %s --> %s' % (img_name, s,))
-        img_name = s
-
+    else:
+        s += '__'
+        s += img_name
+    # logging.info('renaming file: %s --> %s' % (img_name, s,))
+    img_name = s
 
     t_start = time.time()
 
@@ -337,7 +349,7 @@ def get_image(img_url):
         with lock:
             class_images.value += 1
         logging.debug('file already downloaded but not linked: ' + localImgageName)
-        if not os.path.exists(link_file_path):
+        if not os.path.exists(link_file_path) and not os.path.islink(link_file_path):
             os.symlink(rel_file_path, link_file_path)
         return finish('success')
 
@@ -414,7 +426,8 @@ for class_wnid in classes_to_scrape:
     time.sleep(0.05)
     resp = requests.get(url_urls)
 
-    class_folder = os.path.join(imagenet_images_folder, class_wnid + '___' + class_name)
+    classsub = class_wnid + '___' + class_name
+    class_folder = os.path.join(imagenet_images_folder, classsub)
     if not os.path.exists(class_folder):
         os.mkdir(class_folder)
 
@@ -422,6 +435,10 @@ for class_wnid in classes_to_scrape:
 
     urls = [url.decode('utf-8') for url in resp.content.splitlines()]
     logging.info('number of images for class: ' + str(len(urls)))
+    with open( os.path.join(imglists, classsub+'.txt'), 'w') as f:
+        for u in urls:
+            f.write(u)
+            f.write('\n')
 
     logging.info("  Multiprocessing workers: {w}".format(w=args.multiprocessing_workers))
     with Pool(processes=args.multiprocessing_workers) as p:
